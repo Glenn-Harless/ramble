@@ -22,7 +22,7 @@ iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 
 clang -O2 -fobjc-arc -mmacosx-version-min=13.0 \
   -framework Cocoa -framework QuartzCore -framework WebKit -framework AVFoundation \
-  -framework Carbon -framework ServiceManagement -framework ScreenCaptureKit -framework CoreMedia \
+  -framework Carbon -framework CoreAudio -framework ServiceManagement -framework ScreenCaptureKit -framework CoreMedia \
   -o "$APP/Contents/MacOS/Ramble" Sources/main.m
 # Sign with the self-signed "Ramble Signing" certificate when it exists, so macOS keeps
 # Microphone / Accessibility / Screen Recording permissions across rebuilds. Without it,

@@ -385,6 +385,7 @@
         <p class="sub">Changes apply right away.</p>
         <div class="set-row"><div><div class="t">Sounds</div><div class="d">A little tink when recording starts and a pop when it stops.</div></div><label class="switch"><input type="checkbox" data-set="sounds"><span></span></label></div>
         <div class="set-row"><div><div class="t">Floating pill</div><div class="d">Shows a live waveform at the bottom of the screen while you talk.</div></div><label class="switch"><input type="checkbox" data-set="pill"><span></span></label></div>
+        <div class="set-row"><div><div class="t">Pause music while you talk</div><div class="d">Pauses whatever's playing while you dictate and picks it back up after. Skipped during calls and meetings.</div></div><label class="switch"><input type="checkbox" data-set="pauseMedia"><span></span></label></div>
         <div class="set-row"><div><div class="t">Launch at login</div><div class="d">Keep Ramble ready in the menu bar.</div></div><label class="switch"><input type="checkbox" data-set="login"><span></span></label></div>
         <div class="set-row"><div><div class="t">Clean up with Ollama</div><div class="d" id="cleanup-desc">Removes ums and tidies punctuation. Adds about a second.</div></div><label class="switch"><input type="checkbox" data-set="cleanup"><span></span></label></div>
         <div class="set-row"><div><div class="t">Language</div><div class="d">Auto-detect handles other languages but can guess wrong on short clips.</div></div>
@@ -833,7 +834,7 @@
     hist.sort((a, b) => a.ts - b.ts);
     window.ramble.load({
       history: hist,
-      settings: { sounds: true, pill: true, cleanup: false, language: "en", login: false },
+      settings: { sounds: true, pill: true, pauseMedia: true, cleanup: false, language: "en", login: false },
       perms: { mic: "granted", ax: true, screen: false },
       hotkeys: { dictate: "⌃⌥Space", note: "⌃⌥⇧Space", meeting: "⌃⌥M" },
       meeting: { active: false, busy: false },

@@ -29,6 +29,8 @@ screen shows a live waveform, and the menu-bar icon turns red while recording an
 
 - **Accurate and quick.** It uses Whisper large-v3-turbo with Metal acceleration; a short dictation is
   transcribed in one to two seconds on an M2 Pro.
+- **Pauses your music** (Spotify, Apple Music, YouTube...) while you dictate and resumes it afterwards. It
+  leaves it alone when another app is using the mic, like a call, or during a meeting recording.
 - **A custom vocabulary** of names and jargon, passed to Whisper as a hint.
 - **Searchable history and stats**: words per day, streaks, time saved versus typing, speaking pace, and the
   hours you talk most.

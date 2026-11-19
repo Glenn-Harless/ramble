@@ -14,6 +14,7 @@
 #import <Carbon/Carbon.h>
 #import <ServiceManagement/ServiceManagement.h>
 #import <ApplicationServices/ApplicationServices.h>
+#import <CoreAudio/CoreAudio.h>
 
 // MARK: - Settings (edit, then run ./build.sh)
 
@@ -156,6 +157,68 @@ static NSString *Transcribe(NSURL *wav, NSError **error) {
         return nil;
     }
     return Tidy([[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"");
+}
+
+// MARK: - Pausing whatever's playing while you dictate
+
+// MediaRemote is the private framework behind Control Center's Now Playing. It is loaded at runtime,
+// so if a future macOS removes or locks it down, pausing quietly stops working and nothing else breaks.
+typedef void (*MRIsPlayingFn)(dispatch_queue_t, void (^)(Boolean));
+typedef Boolean (*MRSendCommandFn)(int command, CFDictionaryRef options);
+enum { kMRPlay = 0, kMRPause = 1 };
+static MRIsPlayingFn MRIsPlaying;
+static MRSendCommandFn MRSendCommand;
+
+static BOOL LoadMediaRemote(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSURL *url = [NSURL fileURLWithPath:@"/System/Library/PrivateFrameworks/MediaRemote.framework"];
+        CFBundleRef bundle = CFBundleCreate(NULL, (__bridge CFURLRef)url);
+        if (!bundle) return;
+        MRIsPlaying = (MRIsPlayingFn)CFBundleGetFunctionPointerForName(bundle, CFSTR("MRMediaRemoteGetNowPlayingApplicationIsPlaying"));
+        MRSendCommand = (MRSendCommandFn)CFBundleGetFunctionPointerForName(bundle, CFSTR("MRMediaRemoteSendCommand"));
+    });
+    return MRIsPlaying && MRSendCommand;
+}
+
+static UInt32 AudioU32(AudioObjectID object, AudioObjectPropertySelector selector) {
+    AudioObjectPropertyAddress a = {selector, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+    UInt32 value = 0, size = sizeof value;
+    return AudioObjectGetPropertyData(object, &a, 0, NULL, &size, &value) == noErr ? value : 0;
+}
+
+static NSData *AudioObjectList(AudioObjectPropertySelector selector) {
+    AudioObjectPropertyAddress a = {selector, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+    UInt32 size = 0;
+    if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &a, 0, NULL, &size) != noErr || !size) return nil;
+    NSMutableData *data = [NSMutableData dataWithLength:size];
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, NULL, &size, data.mutableBytes) != noErr) return nil;
+    data.length = size;
+    return data;
+}
+
+// True when another app has a microphone open: a Zoom, Meet, Teams or FaceTime call, a voice memo...
+// Then the music isn't touched, since pausing could interrupt the call.
+static BOOL MicInUseElsewhere(void) {
+    if (@available(macOS 14.0, *)) {
+        NSData *list = AudioObjectList(kAudioHardwarePropertyProcessObjectList);
+        const AudioObjectID *ids = list.bytes;
+        pid_t me = getpid();
+        for (NSUInteger i = 0; i < list.length / sizeof(AudioObjectID); i++)
+            if (AudioU32(ids[i], kAudioProcessPropertyIsRunningInput) &&
+                (pid_t)AudioU32(ids[i], kAudioProcessPropertyPID) != me) return YES;
+        return NO;
+    }
+    // macOS 13: no per-app view, so ask whether any device with a microphone is running.
+    NSData *list = AudioObjectList(kAudioHardwarePropertyDevices);
+    const AudioDeviceID *ids = list.bytes;
+    for (NSUInteger i = 0; i < list.length / sizeof(AudioDeviceID); i++) {
+        AudioObjectPropertyAddress in = {kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput, kAudioObjectPropertyElementMain};
+        UInt32 size = 0;
+        if (AudioObjectGetPropertyDataSize(ids[i], &in, 0, NULL, &size) == noErr && size &&
+            AudioU32(ids[i], kAudioDevicePropertyDeviceIsRunningSomewhere)) return YES;
+    }
+    return NO;
 }
 
 // MARK: - Optional cleanup through a local Ollama model
@@ -1003,6 +1066,8 @@ static NSImage *MenuBarIcon(void) {
 @property Phase phase;
 @property Mode mode;
 @property BOOL keyHeld, pressStartedRecording, hotkeyProblem;
+@property BOOL pausedMedia;        // Ramble paused the music for this dictation and should resume it
+@property NSUInteger mediaRequest; // bumped on every start/stop so a late "is it playing?" answer is ignored
 @property (copy) NSString *statusLine, *lastTranscript;
 - (void)openAccessibilitySettings;
 - (void)openMicrophoneSettings;
@@ -1067,6 +1132,7 @@ static NSImage *MenuBarIcon(void) {
         @"settings": @{@"sounds": @([Defaults() boolForKey:@"sounds"]),
                        @"pill": @([Defaults() boolForKey:@"pill"]),
                        @"cleanup": @([Defaults() boolForKey:@"cleanup"]),
+                       @"pauseMedia": @([Defaults() boolForKey:@"pauseMedia"]),
                        @"language": [Defaults() stringForKey:@"language"] ?: @"en",
                        @"login": @(self.app.loginEnabled)},
         @"perms": @{@"mic": mic, @"ax": @(AXIsProcessTrusted()), @"screen": @(CGPreflightScreenCaptureAccess())},
@@ -1103,7 +1169,7 @@ static NSImage *MenuBarIcon(void) {
         NSString *key = m[@"key"];
         id value = m[@"value"];
         if ([key isEqualToString:@"login"]) [self.app setLoginEnabled:[value boolValue]];
-        else if ([@[@"sounds", @"pill", @"cleanup"] containsObject:key]) [Defaults() setBool:[value boolValue] forKey:key];
+        else if ([@[@"sounds", @"pill", @"cleanup", @"pauseMedia"] containsObject:key]) [Defaults() setBool:[value boolValue] forKey:key];
         else if ([key isEqualToString:@"language"] && [value isKindOfClass:NSString.class]) [Defaults() setObject:value forKey:key];
     } else if ([action isEqualToString:@"saveVocabulary"] && [m[@"text"] isKindOfClass:NSString.class]) {
         [m[@"text"] writeToURL:VocabularyFile() atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -1143,7 +1209,7 @@ static NSImage *MenuBarIcon(void) {
 - (BOOL)cleanupOn { return [Defaults() boolForKey:@"cleanup"]; }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
-    [Defaults() registerDefaults:@{@"sounds": @YES, @"pill": @YES, @"cleanup": @NO, @"language": @"en"}];
+    [Defaults() registerDefaults:@{@"sounds": @YES, @"pill": @YES, @"cleanup": @NO, @"pauseMedia": @YES, @"language": @"en"}];
     [self buildMainMenu];
     self.statusLine = @"Ready";
     self.pill = [Pill new];
@@ -1255,6 +1321,7 @@ static NSImage *MenuBarIcon(void) {
         [self fail:@"Microphone access is off. Turn it on in System Settings › Privacy & Security › Microphone."];
         return;
     }
+    BOOL micBusy = MicInUseElsewhere();  // checked before our own recorder opens the mic
     NSURL *url = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:
                   [NSString stringWithFormat:@"ramble-%@.wav", NSUUID.UUID.UUIDString]]];
     NSDictionary *settings = @{AVFormatIDKey: @(kAudioFormatLinearPCM), AVSampleRateKey: @16000.0,
@@ -1272,12 +1339,32 @@ static NSImage *MenuBarIcon(void) {
     self.statusLine = mode == ModePaste ? @"Listening… (Esc cancels)" : @"Listening for a note… (Esc cancels)";
     [self refreshIcon];
     Play(@"Tink");
+    [self pauseMediaUnless:micBusy];
     if (self.pillOn) [self.pill showRecording:mode];
     __weak App *weakSelf = self;
     self.meterTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 / 30 repeats:YES block:^(NSTimer *t) {
         [weakSelf tickMeter];
     }];
     RegisterHotKey(9, kVK_Escape, 0, ^(BOOL p) { if (p) [weakSelf cancel]; });
+}
+
+// Pause music or video for the dictation, unless a call (another app using the mic) or a Ramble
+// meeting recording is going on. Only resumes what Ramble itself paused.
+- (void)pauseMediaUnless:(BOOL)micBusy {
+    self.pausedMedia = NO;
+    NSUInteger request = ++self.mediaRequest;
+    if (micBusy || self.meeting || ![Defaults() boolForKey:@"pauseMedia"] || !LoadMediaRemote()) return;
+    MRIsPlaying(dispatch_get_main_queue(), ^(Boolean playing) {
+        if (!playing || request != self.mediaRequest || self.phase != PhaseRecording) return;
+        if (MRSendCommand(kMRPause, NULL)) self.pausedMedia = YES;
+    });
+}
+
+- (void)resumeMedia {
+    self.mediaRequest++;
+    if (!self.pausedMedia) return;
+    self.pausedMedia = NO;
+    MRSendCommand(kMRPlay, NULL);
 }
 
 - (void)tickMeter {
@@ -1293,6 +1380,7 @@ static NSImage *MenuBarIcon(void) {
     [self.meterTimer invalidate];
     [self.recorder stop];
     self.recorder = nil;
+    [self resumeMedia];
     if (duration) *duration = -[self.recordStart timeIntervalSinceNow];
     NSURL *url = self.clipURL;
     self.clipURL = nil;
